@@ -1,0 +1,1 @@
+# Auto-Collect-Gym-Summer-Event
