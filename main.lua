@@ -1,9 +1,8 @@
--- Dex Collector with Mobile ON/OFF Button
+-- Dex Collector with Working Server Teleport
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
-local UserInputService = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 
 local DexCollector = {
     Running = false,
@@ -13,107 +12,75 @@ local DexCollector = {
     CurrentGiftId = 1,
     MaxGiftId = 9,
     CurrentServerId = nil,
-    UI = nil
+    RejoinAttempts = 0,
+    MaxRejoinAttempts = 3
 }
 
--- Create the ON/OFF button
-function DexCollector:CreateButton()
-    if self.UI then self.UI:Destroy() end
-    
-    local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "DexCollectorUI"
-    ScreenGui.Parent = CoreGui
-    ScreenGui.ResetOnSpawn = false
-    
-    local ToggleButton = Instance.new("TextButton")
-    ToggleButton.Name = "ToggleButton"
-    ToggleButton.Size = UDim2.new(0, 120, 0, 50)
-    ToggleButton.Position = UDim2.new(0.5, -60, 0, 20)
-    ToggleButton.AnchorPoint = Vector2.new(0.5, 0)
-    ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-    ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    ToggleButton.Text = "START"
-    ToggleButton.Font = Enum.Font.SourceSansBold
-    ToggleButton.TextSize = 18
-    ToggleButton.Parent = ScreenGui
-    
-    -- Make button draggable
-    local dragging
-    local dragInput
-    local dragStart
-    local startPos
-    
-    local function update(input)
-        local delta = input.Position - dragStart
-        ToggleButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-    end
-    
-    ToggleButton.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = ToggleButton.Position
-            
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
+-- Function to safely get server list
+function DexCollector:GetServerList()
+    local success, result = pcall(function()
+        return TeleportService:GetGameInstances(game.PlaceId)
     end)
-    
-    ToggleButton.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
-        end
-    end)
-    
-    UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            update(input)
-        end
-    end)
-    
-    -- Toggle functionality
-    ToggleButton.MouseButton1Click:Connect(function()
-        if self.Running then
-            self:Stop()
-            ToggleButton.Text = "START"
-            ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-        else
-            self:Start()
-            ToggleButton.Text = "STOP"
-            ToggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-        end
-    end)
-    
-    -- Touch support for mobile
-    ToggleButton.TouchTap:Connect(function()
-        if self.Running then
-            self:Stop()
-            ToggleButton.Text = "START"
-            ToggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-        else
-            self:Start()
-            ToggleButton.Text = "STOP"
-            ToggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-        end
-    end)
-    
-    self.UI = ScreenGui
+    return success and result or {}
 end
 
-function DexCollector:FindGoodServer()
-    local gameId = game.PlaceId
-    local servers = TeleportService:GetGameInstances(gameId)
+-- Improved server teleport function
+function DexCollector:TeleportToGoodServer()
+    local servers = self:GetServerList()
     
+    -- Try to find the same server first
+    if self.CurrentServerId then
+        for _, server in ipairs(servers) do
+            if tostring(server.id) == tostring(self.CurrentServerId) and #server.playing > 0 then
+                print("Rejoining previous server...")
+                return server.id
+            end
+        end
+    end
+    
+    -- Find any server with players
     for _, server in ipairs(servers) do
         if #server.playing > 0 then
+            print("Found server with players:", server.id)
             return server.id
         end
     end
     
+    -- If no servers found, try default teleport
+    warn("No servers with players found. Using default teleport...")
     return nil
+end
+
+-- New improved teleport function
+function DexCollector:SafeTeleport(serverId)
+    if not serverId then
+        -- Normal teleport if no server ID
+        TeleportService:Teleport(game.PlaceId)
+        return
+    end
+
+    local success, errorMsg = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId)
+    end)
+    
+    if not success then
+        warn("Teleport failed:", errorMsg)
+        -- Fallback to normal teleport
+        TeleportService:Teleport(game.PlaceId)
+    end
+end
+
+function DexCollector:StartCollection()
+    self.Running = true
+    self.Collected = 0
+    
+    while self.Running and task.wait(1) do
+        -- Collect using remote
+        self:CollectWithRemote()
+        
+        -- Collect physical items
+        self:CollectPhysicalItems()
+    end
 end
 
 function DexCollector:CollectWithRemote()
@@ -132,7 +99,7 @@ function DexCollector:CollectWithRemote()
             self.LastCollectionTime = now
             
             if self.CurrentGiftId == self.MaxGiftId then
-                print("Collected all gifts! Preparing to rejoin server...")
+                print("Collected all gifts! Preparing to rejoin...")
                 self:RejoinServer()
             end
             
@@ -146,53 +113,12 @@ function DexCollector:CollectWithRemote()
     end
 end
 
-function DexCollector:RejoinServer()
-    local serverInfo = game:GetService("TeleportService"):GetPlayerPlaceInstanceAsync(game.PlaceId, game.JobId)
-    if serverInfo then
-        print("Rejoining server...")
-        wait(5)
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverInfo.id)
-    else
-        warn("Couldn't get server info. Finding new server...")
-        self:FindAndJoinServer()
-    end
-end
-
-function DexCollector:FindAndJoinServer()
-    local serverId = self:FindGoodServer()
-    if serverId then
-        print("Found server with players. Teleporting...")
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId)
-    else
-        warn("No servers with players found. Trying again in 30 seconds...")
-        wait(30)
-        self:FindAndJoinServer()
-    end
-end
-
-function DexCollector:Start()
-    if self.Running then return end
-    
-    self.Running = true
-    self.Collected = 0
-    
-    print("Looking for a server with players...")
-    local goodServerId = self:FindGoodServer()
-    
-    if goodServerId then
-        print("Found server with players. Teleporting...")
-        self.CurrentServerId = goodServerId
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, goodServerId)
-    else
-        warn("No servers with players found. Continuing in current server.")
-    end
-    
-    while self.Running and wait(1) do
-        self:CollectWithRemote()
-        
-        for _, part in ipairs(workspace:GetDescendants()) do
-            if part.Name == "Collectable" and part:IsA("BasePart") then
-                local humanoidRootPart = Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+function DexCollector:CollectPhysicalItems()
+    for _, part in ipairs(workspace:GetDescendants()) do
+        if part.Name == "Collectable" and part:IsA("BasePart") then
+            local character = Players.LocalPlayer.Character
+            if character then
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
                 if humanoidRootPart then
                     firetouchinterest(humanoidRootPart, part, 0)
                     firetouchinterest(humanoidRootPart, part, 1)
@@ -203,16 +129,51 @@ function DexCollector:Start()
     end
 end
 
+function DexCollector:RejoinServer()
+    if self.RejoinAttempts >= self.MaxRejoinAttempts then
+        warn("Max rejoin attempts reached")
+        return
+    end
+    
+    self.RejoinAttempts = self.RejoinAttempts + 1
+    
+    local serverId = self:TeleportToGoodServer()
+    if serverId then
+        print("Attempting to rejoin server... (Attempt "..self.RejoinAttempts.."/"..self.MaxRejoinAttempts..")")
+        self.CurrentServerId = serverId
+        self:Stop()
+        wait(5)
+        self:Start()
+    else
+        warn("Failed to find server. Trying again in 30 seconds...")
+        wait(30)
+        self:RejoinServer()
+    end
+end
+
+function DexCollector:Start()
+    if self.Running then return end
+    
+    print("Starting collector...")
+    
+    -- First try to find a good server
+    local serverId = self:TeleportToGoodServer()
+    if serverId then
+        self.CurrentServerId = serverId
+        print("Found server. Teleporting...")
+        self:Stop()
+        wait(2)
+        self:StartCollection()
+    else
+        warn("No servers found. Starting collection in current server.")
+        self:StartCollection()
+    end
+end
+
 function DexCollector:Stop()
     self.Running = false
     print("Collector stopped. Total collected:", self.Collected)
 end
 
--- Initialize the button
-DexCollector:CreateButton()
-
--- For mobile touch support
-if UserInputService.TouchEnabled then
-    DexCollector.UI.ToggleButton.Size = UDim2.new(0, 150, 0, 60)
-    DexCollector.UI.ToggleButton.TextSize = 22
-end
+-- Start the collector
+DexCollector:Start()
